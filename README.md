@@ -26,6 +26,16 @@ For safety under stricter ExecutionPolicy settings you should sign `RandomMAC.ps
 
 See `SIGNING.md` for copy-paste-ready commands.
 
+Usage (short)
+-------------
+- Clone the repo and edit `randomMAC.config.json` to match your environment.
+- Validate the config: `pwsh -NoProfile -ExecutionPolicy Bypass -File .\test-validate-config.ps1`.
+- Dry-run: `.\RandomMAC.ps1 -AuditMode` (will not change MACs).
+- Sign `RandomMAC.ps1` if running under AllSigned; see `SIGNING.md`.
+- Run interactively as Administrator or register the scheduled task as SYSTEM.
+
+See `USAGE.md` for a full step-by-step guide.
+
 Quick start (test run without changing MACs)
 -------------------------------------------
 Run an audit-only test to see which adapters the script would target and to confirm logging works:
