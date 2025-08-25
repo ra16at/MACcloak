@@ -36,7 +36,6 @@ else {
     # Accept boolean-like values; ConvertTo-Json returns booleans as System.Boolean normally.
     if ($cfg.Safety.RollbackOnNoIPv4 -ne $null -and -not ($cfg.Safety.RollbackOnNoIPv4 -is [bool])) { $errors += 'Safety.RollbackOnNoIPv4 should be boolean' }
 }
-}
 
 if (-not ($cfg.Forensics -and $cfg.Forensics.HashChainFile)) { $errors += 'Forensics.HashChainFile missing' }
 
