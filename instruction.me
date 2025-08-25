@@ -1,0 +1,98 @@
+Signing RandomMAC.ps1 - instructions
+
+Overview
+
+These commands show how to create (or locate) a Code Signing certificate, sign `RandomMAC.ps1`, verify the signature, and optionally trust/export the certificate so the script runs under AllSigned policy on this machine or others.
+
+Run these in an elevated PowerShell prompt (Run as Administrator) when noted.
+
+1) Open the folder containing the script
+
+```powershell
+cd "C:\Program Files\SecureScripts"
+```
+
+2) (Optional) Locate an existing Code Signing certificate in CurrentUser store
+
+```powershell
+Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.HasPrivateKey -and ($_.EnhancedKeyUsageList.FriendlyName -contains 'Code Signing') } | Select-Object Subject,Thumbprint,NotAfter
+```
+
+If you find a certificate you want to use, note its Thumbprint.
+
+3) Create a new self-signed Code Signing certificate (if you don't have one)
+
+```powershell
+# Creates a code-signing certificate in CurrentUser\My that is exportable and valid for 3 years
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=RandomMAC User" -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(3)
+$cert | Select-Object Subject,Thumbprint,NotAfter
+```
+
+4) Use the certificate object (or locate by Thumbprint) to sign the script
+
+If you created/assigned the $cert variable above, use:
+
+```powershell
+Set-AuthenticodeSignature -FilePath .\RandomMAC.ps1 -Certificate $cert -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
+```
+
+If you prefer to select by thumbprint:
+
+```powershell
+$thumb = '<PASTE_THUMBPRINT_HERE>'
+$cert = Get-ChildItem Cert:\CurrentUser\My\$thumb
+Set-AuthenticodeSignature -FilePath .\RandomMAC.ps1 -Certificate $cert -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
+```
+
+5) Verify the signature
+
+```powershell
+Get-AuthenticodeSignature -FilePath .\RandomMAC.ps1 | Format-List *
+```
+
+Expect `Status : Valid` when signing succeeded.
+
+6) (Optional) Make the certificate trusted for script execution on this machine
+
+A self-signed certificate will not be trusted by default. To run scripts under `AllSigned` policy you can either:
+
+- Add the certificate to `TrustedPeople` (CurrentUser) so the publisher is trusted for your user account
+- Or add to `TrustedPublishers` (LocalMachine) so any user on the machine trusts the publisher (requires Administrator)
+
+Add to CurrentUser TrustedPeople (no elevation):
+
+```powershell
+$cert | Export-Certificate -FilePath .\randommac_pub.cer
+Import-Certificate -FilePath .\randommac_pub.cer -CertStoreLocation Cert:\CurrentUser\TrustedPeople
+```
+
+Add to LocalMachine TrustedPublisher (requires Admin):
+
+```powershell
+# Export the public cert
+$cert | Export-Certificate -FilePath C:\Windows\Temp\randommac_pub.cer
+# Import into LocalMachine TrustedPublisher
+Import-Certificate -FilePath C:\Windows\Temp\randommac_pub.cer -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
+```
+
+7) (Optional) Export a PFX to install on another machine (to sign there or install private key)
+
+```powershell
+# Export PFX (you will be prompted for a password)
+$pw = Read-Host -AsSecureString "PFX password"
+Export-PfxCertificate -Cert $cert -FilePath .\randommac_signer.pfx -Password $pw
+```
+
+8) (Optional) Set ExecutionPolicy to AllSigned (requires Admin)
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy AllSigned -Scope LocalMachine -Force
+```
+
+Notes
+
+- Timestamp server is optional but recommended so signatures remain valid after the cert expires.
+- Self-signed certificates are fine for single-machine use but consider a CA-signed code-signing cert for distribution.
+- When importing into LocalMachine stores, run PowerShell as Administrator.
+
+If you want, I can also remove the `-SetupSchedule` interactive scheduler from `RandomMAC.ps1` and add scheduling instructions to this file.

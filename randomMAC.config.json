@@ -1,15 +1,10 @@
 {
-  // === External Logging Settings ===
   "ExternalLog": {
-    // List of volume labels to search for when storing logs externally
     "VolumeLabels": [ "PRIVLOG", "MACCLOAK_LOGS" ],
-    // If true, will fall back to local "logs" folder if no external drive is found
     "FallbackLocal": true
   },
 
-  // === Adapter Selection ===
   "Adapters": {
-    // Patterns to exclude from MAC randomization (regex match against name + description)
     "ExcludePatterns": [
       "Bluetooth",
       "Virtual",
@@ -19,19 +14,13 @@
     ]
   },
 
-  // === Safety Settings ===
   "Safety": {
-    // Maximum seconds to wait for adapter to re-enable before aborting
     "MaxDisableSeconds": 45,
-    // Seconds to wait after adapter is up before checking IPv4
     "HealthWaitSeconds": 20,
-    // Roll back to original MAC if no IPv4 address is assigned after change
     "RollbackOnNoIPv4": true
   },
 
-  // === Forensic Logging ===
   "Forensics": {
-    // File name to store the last hash in the chain
     "HashChainFile": "hashchain.state"
   }
 }
