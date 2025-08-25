@@ -93,7 +93,8 @@ function Set-PrevHash {
 }
 
 function New-RandomMac {
-    $bytes = 1..6 | ForEach-Object { Get-Random -Minimum 0 -Maximum 255 }
+    # Get-Random -Maximum is exclusive, so use 256 to allow 0-255
+    $bytes = 1..6 | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }
     # Set locally administered bit, ensure unicast
     $bytes[0] = ($bytes[0] -bor 0x02) -band 0xFE
     return ($bytes | ForEach-Object { $_.ToString("X2") }) -join ""
@@ -143,9 +144,15 @@ if (-not (Test-Path $ConfigPath)) {
 }
 $cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
 
-# Determine log root
-$vol = Get-Volume | Where-Object { $_.FileSystemLabel -in $cfg.ExternalLog.VolumeLabels } | Select-Object -First 1
-$logRoot = if ($vol) { $vol.DriveLetter + ":\randomMAC" } elseif ($cfg.ExternalLog.FallbackLocal) { Join-Path $PSScriptRoot "logs" } else { throw "No log volume" }
+# Find a volume matching one of the configured labels. Prefer volumes with a DriveLetter.
+$volumes = Get-Volume | Where-Object { $_.FileSystemLabel -in $cfg.ExternalLog.VolumeLabels }
+$vol = $volumes | Where-Object { $_.DriveLetter } | Select-Object -First 1
+if (-not $vol) { $vol = $volumes | Select-Object -First 1 }
+
+$logRoot = if ($vol) {
+    if ($vol.DriveLetter) { $vol.DriveLetter + ":\randomMAC" }
+    else { Join-Path $vol.Path "randomMAC" }
+} elseif ($cfg.ExternalLog.FallbackLocal) { Join-Path $PSScriptRoot "logs" } else { throw "No log volume" }
 if (!(Test-Path $logRoot)) { New-Item -ItemType Directory -Path $logRoot | Out-Null }
 
 # Prepare log paths

@@ -20,16 +20,22 @@ try {
 $errors = @()
 
 if (-not ($cfg.ExternalLog -and $cfg.ExternalLog.VolumeLabels)) { $errors += 'ExternalLog.VolumeLabels missing' }
-if ($cfg.ExternalLog -and ($cfg.ExternalLog.FallbackLocal -isnot [bool])) { $errors += 'ExternalLog.FallbackLocal should be boolean' }
+if ($cfg.ExternalLog -and $null -eq $cfg.ExternalLog.FallbackLocal) { $errors += 'ExternalLog.FallbackLocal missing' }
 
 if (-not ($cfg.Adapters -and $cfg.Adapters.ExcludePatterns)) { $errors += 'Adapters.ExcludePatterns missing' }
 
-if (-not ($cfg.Safety -and $cfg.Safety.MaxDisableSeconds -and $cfg.Safety.HealthWaitSeconds)) { $errors += 'Safety.MaxDisableSeconds or Safety.HealthWaitSeconds missing' }
+if (-not ($cfg.Safety)) { $errors += 'Safety section missing' }
+else {
+    if ($null -eq $cfg.Safety.MaxDisableSeconds) { $errors += 'Safety.MaxDisableSeconds missing' }
+    if ($null -eq $cfg.Safety.HealthWaitSeconds) { $errors += 'Safety.HealthWaitSeconds missing' }
 
-if ($cfg.Safety) {
-    if ($cfg.Safety.MaxDisableSeconds -isnot [int]) { $errors += 'Safety.MaxDisableSeconds should be integer' }
-    if ($cfg.Safety.HealthWaitSeconds -isnot [int]) { $errors += 'Safety.HealthWaitSeconds should be integer' }
-    if ($cfg.Safety.RollbackOnNoIPv4 -isnot [bool]) { $errors += 'Safety.RollbackOnNoIPv4 should be boolean' }
+    # JSON numbers come back as System.Int64 or System.Double depending on parser. Accept numeric types.
+    if ($cfg.Safety.MaxDisableSeconds -ne $null -and -not ($cfg.Safety.MaxDisableSeconds -is [int] -or $cfg.Safety.MaxDisableSeconds -is [long] -or $cfg.Safety.MaxDisableSeconds -is [double])) { $errors += 'Safety.MaxDisableSeconds should be numeric' }
+    if ($cfg.Safety.HealthWaitSeconds -ne $null -and -not ($cfg.Safety.HealthWaitSeconds -is [int] -or $cfg.Safety.HealthWaitSeconds -is [long] -or $cfg.Safety.HealthWaitSeconds -is [double])) { $errors += 'Safety.HealthWaitSeconds should be numeric' }
+
+    # Accept boolean-like values; ConvertTo-Json returns booleans as System.Boolean normally.
+    if ($cfg.Safety.RollbackOnNoIPv4 -ne $null -and -not ($cfg.Safety.RollbackOnNoIPv4 -is [bool])) { $errors += 'Safety.RollbackOnNoIPv4 should be boolean' }
+}
 }
 
 if (-not ($cfg.Forensics -and $cfg.Forensics.HashChainFile)) { $errors += 'Forensics.HashChainFile missing' }
