@@ -29,7 +29,8 @@ jobs:
         shell: pwsh
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -Repository PSGallery -AllowClobber
-          $diag = Invoke-ScriptAnalyzer -Path .\RandomMAC.ps1 -Recurse
+          $settings = Join-Path $PSScriptRoot 'PSScriptAnalyzer.Settings.psd1'
+          $diag = Invoke-ScriptAnalyzer -Path .\RandomMAC.ps1 -Recurse -Settings $settings
           if ($diag | Where-Object { $_.Severity -eq 'Error' }) {
             $diag | Where-Object { $_.Severity -eq 'Error' } | Format-Table -AutoSize
             Write-Error 'PSScriptAnalyzer found Errors'
