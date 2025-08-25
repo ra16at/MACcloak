@@ -79,14 +79,6 @@ Security notes
 - Self-signed certificates are suitable for single-machine use. For distribution, use a CA-issued code-signing certificate.
 - Importing a certificate into `LocalMachine` stores requires admin and affects trust for all users — only do this when you understand the implications.
 
-What I changed
---------------
-- Added this `README.md` to make publishing on GitHub easier and to provide clear, copy-paste commands for signing and running.
-
-If you want
-----------
-- I can move `instruction.me` into `docs/` or convert it to a `SIGNING.md` file and expand with screenshots or CI hints.
-- I can add a GitHub Actions workflow that validates the script (e.g., runs `Get-AuthenticodeSignature` and simple lint checks) on push.
 
 Releasing (sign and publish)
 ----------------------------
