@@ -1,0 +1,64 @@
+name: Release signing
+
+on:
+  workflow_dispatch: {}
+  # You can also trigger on tags, e.g. push: tags: ['v*']
+
+jobs:
+  sign:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decode and import PFX
+        id: import_pfx
+        shell: pwsh
+        env:
+          SIGNING_PFX: ${{ secrets.SIGNING_PFX }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          Write-Host "Preparing PFX from secrets"
+          if (-not $env:SIGNING_PFX) { Write-Error 'SIGNING_PFX secret is missing'; exit 1 }
+          $pfxPath = Join-Path $PWD 'signer.pfx'
+          [IO.File]::WriteAllBytes($pfxPath,[Convert]::FromBase64String($env:SIGNING_PFX))
+          $securePw = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePw
+          if (-not $cert) { Write-Error 'Failed to import PFX'; exit 1 }
+          Write-Host "Imported cert: $($cert.Thumbprint)"
+          # write output in the GITHUB_OUTPUT format
+          "SIGNER_THUMB=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ASCII -Append
+
+      - name: Sign RandomMAC.ps1
+        shell: pwsh
+        run: |
+          $thumb = '${{ steps.import_pfx.outputs.SIGNER_THUMB }}'
+          Write-Host "Signing RandomMAC.ps1 with cert $thumb"
+          $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb }
+          if (-not $cert) { Write-Error 'Certificate not found in store'; exit 1 }
+          Set-AuthenticodeSignature -FilePath .\RandomMAC.ps1 -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+          Get-AuthenticodeSignature -FilePath .\RandomMAC.ps1 | Format-List *
+
+      - name: Export public cert
+        shell: pwsh
+        run: |
+          $thumb = '${{ steps.import_pfx.outputs.SIGNER_THUMB }}'
+          $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb }
+          $pub = Join-Path $PWD 'randommac_pub.cer'
+          Export-Certificate -Cert $cert -FilePath $pub -Force
+          Write-Host "Exported public cert to $pub"
+
+      - name: Upload public cert
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-cert
+          path: randommac_pub.cer
+
+      - name: Cleanup
+        shell: pwsh
+        run: |
+          # remove PFX file and remove cert from store
+          $pfxPath = Join-Path $PWD 'signer.pfx'
+          if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
+          $thumb = '${{ steps.import_pfx.outputs.SIGNER_THUMB }}'
+          if ($thumb) { Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb } | ForEach-Object { Remove-Item -Path $_.PSPath -Recurse -Force } }

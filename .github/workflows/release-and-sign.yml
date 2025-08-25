@@ -1,0 +1,115 @@
+name: Release and Sign
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  sign_and_release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Import signing PFX
+        id: import_pfx
+        shell: pwsh
+        env:
+          SIGNING_PFX: ${{ secrets.SIGNING_PFX }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
+        run: |
+          Write-Host "Decoding PFX and importing into CurrentUser\My"
+          if (-not $env:SIGNING_PFX) { Write-Error 'SIGNING_PFX secret missing'; exit 1 }
+          $pfxPath = Join-Path $PWD 'signer.pfx'
+          [IO.File]::WriteAllBytes($pfxPath,[Convert]::FromBase64String($env:SIGNING_PFX))
+          $securePw = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePw
+          if (-not $cert) { Write-Error 'Failed to import PFX'; exit 1 }
+          "SIGNER_THUMB=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ASCII -Append
+
+      - name: Sign RandomMAC.ps1
+        shell: pwsh
+        run: |
+          $thumb = '${{ steps.import_pfx.outputs.SIGNER_THUMB }}'
+          Write-Host "Signing RandomMAC.ps1 with certificate $thumb"
+          $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb }
+          if (-not $cert) { Write-Error 'Certificate not found in store'; exit 1 }
+          Set-AuthenticodeSignature -FilePath .\RandomMAC.ps1 -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com'
+          $sig = Get-AuthenticodeSignature -FilePath .\RandomMAC.ps1
+          Write-Host "Signature status: $($sig.Status)"
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        run: |
+          git --no-pager log -n 20 --pretty=format:"- %s (%h)" > release_notes.txt
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat release_notes.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          release_name: "MACcloak ${{ steps.tag.outputs.tag }}"
+          body: |
+            ## MACcloak release ${{ steps.tag.outputs.tag }}
+
+            This release contains the signed `RandomMAC.ps1` script.
+
+            - Signed on: ${{ github.event.head_commit.timestamp }}
+            - Commit: ${{ github.sha }}
+
+            ### Changes
+
+            ${{ steps.notes.outputs.notes }}
+
+            ## Verify the signature
+
+            You can verify the signature locally with:
+
+            ```powershell
+            Get-AuthenticodeSignature -FilePath RandomMAC.ps1 | Format-List *
+            ```
+
+            The public certificate is attached as an artifact.
+
+      - name: Export public cert
+        shell: pwsh
+        run: |
+          $thumb = '${{ steps.import_pfx.outputs.SIGNER_THUMB }}'
+          $cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb }
+          $pub = Join-Path $PWD 'randommac_pub.cer'
+          Export-Certificate -Cert $cert -FilePath $pub -Force
+
+      - name: Upload signed script
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: RandomMAC.ps1
+          asset_name: RandomMAC-${{ steps.tag.outputs.tag }}.ps1
+          asset_content_type: application/octet-stream
+
+      - name: Upload public cert
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: randommac_pub.cer
+          asset_name: randommac_pub.cer
+          asset_content_type: application/x-x509-ca-cert
+
+      - name: Cleanup
+        shell: pwsh
+        run: |
+          $pfxPath = Join-Path $PWD 'signer.pfx'
+          if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
+          $thumb = '${{ steps.import_pfx.outputs.SIGNER_THUMB }}'
+          if ($thumb) { Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb } | ForEach-Object { Remove-Item -Path $_.PSPath -Recurse -Force } }

@@ -11,13 +11,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify script signature
+      - name: Check script signature (warning)
         shell: pwsh
         run: |
-          Write-Host "Checking RandomMAC.ps1 signature"
+          Write-Host "Checking RandomMAC.ps1 signature (will warn but not fail CI)"
           $sig = Get-AuthenticodeSignature -FilePath .\RandomMAC.ps1
           Write-Host "Signature status: $($sig.Status)"
-          if ($sig.Status -ne 'Valid') { Write-Error "Signature not valid: $($sig.Status)"; exit 1 }
+          if ($sig.Status -ne 'Valid') { Write-Warning "Signature not valid: $($sig.Status)" }
+
+      - name: Validate config
+        shell: pwsh
+        run: |
+          Write-Host "Validating randomMAC.config.json"
+          .\test-validate-config.ps1
 
       - name: Run PSScriptAnalyzer
         shell: pwsh

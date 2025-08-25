@@ -1,0 +1,10 @@
+# Ignore exported private keys and temporary secrets
+*.pfx
+*.key
+*.pvk
+secrets.*
+# Editor/temp files
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

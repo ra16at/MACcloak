@@ -8,7 +8,7 @@ Run these in PowerShell. Use an elevated prompt (Run as Administrator) only when
 1) Change to the script folder
 
 ```powershell
-cd "C:\Program Files\SecureScripts"
+cd "C:\Program Files\MACcloak"
 ```
 
 2) Find an existing Code Signing certificate (optional)
