@@ -1,147 +1,167 @@
-﻿<#
-.SYNOPSIS
-  MACcloak – Hardened MAC randomizer with tamper-evident logging, global scheduling, and built-in signing wizard.
+﻿# ┌────────────────────────────────────────────────────────────┐
+# │ MACcloak: Forensic-Grade MAC Randomization Script          │
+# │ Part 1: Initialization & Configuration                     │
+# └────────────────────────────────────────────────────────────┘
 
-.DESCRIPTION
-  - Randomizes MAC addresses for physical adapters on schedule
-  - Logs to external drive with hash-chain tamper detection
-  - Safe rollback if no IPv4 after change
-  - Interactive scheduling (-SetupSchedule)
-    - (Signing removed) Use instructions.me for manual signing
-  - Audit mode for testing without changes
-#>
-
-[CmdletBinding(SupportsShouldProcess = $true)]
-param(
-    [string]$ConfigPath = "$PSScriptRoot\randomMAC.config.json",
+param (
     [switch]$AuditMode,
     [switch]$VerboseLogs,
-    [switch]$SetupSchedule
+    [switch]$SetupSchedule,
+    [switch]$ScanAdapters
 )
 
-# First-run onboarding removed. See instruction.me for manual signing and scheduling steps.
-
-# Interactive signing wizard removed. Use instruction.me for manual signing instructions.
-
-# =========================
-# SCHEDULER WIZARD (-SetupSchedule)
-# =========================
-if ($SetupSchedule) {
-    Write-Host "=== MACcloak Scheduler Setup ===" -ForegroundColor Cyan
-    do {
-        $timeInput = Read-Host "Enter daily run time (HH:MM, 24-hour format, local time)"
-    } until ($timeInput -match '^(?:[01]?\d|2[0-3]):[0-5]\d$')
-
-    $parts = $timeInput -split ':'
-    $runHour = [int]$parts[0]
-    $runMinute = [int]$parts[1]
-
-    $startupChoice = Read-Host "Also run at every system startup? (Y/N)"
-    $addStartup = $startupChoice -match '^[Yy]'
-
-    $dailyTrigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::Today.AddHours($runHour).AddMinutes($runMinute).TimeOfDay)
-    $triggers = @($dailyTrigger)
-    if ($addStartup) { $triggers += New-ScheduledTaskTrigger -AtStartup }
-
-    $scriptPath = $MyInvocation.MyCommand.Path
-    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy AllSigned -File `"$scriptPath`""
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew
-
-    Register-ScheduledTask -TaskName "MACcloak Auto" -Action $action -Trigger $triggers -RunLevel Highest -User "SYSTEM" -Description "MACcloak: Daily MAC randomization with forensic logging" -Force
-
-    Write-Host "✅ Scheduled task 'MACcloak Auto' created successfully." -ForegroundColor Green
-    Write-Host "Daily run time: $timeInput (local time)"
-    if ($addStartup) { Write-Host "Also runs at every system startup." }
-
-    exit
+# Load configuration
+$configPath = Join-Path $PSScriptRoot "randomMAC.config.json"
+if (-not (Test-Path $configPath)) {
+    Write-Error "Configuration file not found: $configPath"
+    exit 1
 }
 
-# =========================
-# UTILITY FUNCTIONS
-# =========================
+$config = Get-Content $configPath | ConvertFrom-Json
 
-function Write-Status {
-    param(
-        [string]$Message,
-        [string]$Level = "INFO"
-    )
-    Write-Host "[$(Get-Date -f s)][$Level] $Message"
+# Validate required config fields
+if (-not $config.adapterExclusions -or -not $config.logVolumeLabels -or -not $config.healthWaitSeconds) {
+    Write-Error "Missing required fields in config file."
+    exit 1
 }
 
-function Compute-Hash {
-    param([string]$InputString)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($InputString)
-    $hashBytes = $sha.ComputeHash($bytes)
-    return ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ""
-}
+# Prepare adapter exclusion regex
+$exclusionRegex = ($config.adapterExclusions -join "|")
 
-function Get-PrevHash {
-    param([string]$Path)
-    if (Test-Path $Path) {
-        return Get-Content $Path -Raw
+# Prepare log file path
+$logDate = Get-Date -Format "yyyy-MM-dd"
+$logFileName = "randomMAC-$logDate.jsonl"
+$logPath = $null
+
+foreach ($label in $config.logVolumeLabels) {
+    $volume = Get-Volume | Where-Object { $_.FileSystemLabel -eq $label -and $_.DriveLetter }
+    if ($volume) {
+        $logPath = "$($volume.DriveLetter):\$logFileName"
+        break
     }
-    return ""
 }
 
-function Set-PrevHash {
-    param(
-        [string]$Path,
-        [string]$Hash
+if (-not $logPath) {
+    $logPath = Join-Path $PSScriptRoot $logFileName
+    if ($VerboseLogs) {
+        Write-Warning "No external log volume found. Using local fallback: $logPath"
+    }
+}
+
+# Load previous hash if available
+$previousHash = ""
+if (Test-Path $logPath) {
+    $lastLine = Get-Content $logPath | Select-Object -Last 1
+    if ($lastLine) {
+        $lastEntry = $lastLine | ConvertFrom-Json
+        $previousHash = $lastEntry.hash
+    }
+}
+
+# Utility: Write log entry with chained hash
+function Write-LogEntry {
+    param (
+        [hashtable]$entry
     )
-    Set-Content -Path $Path -Value $Hash -NoNewline -Encoding ASCII
+    $entry.previousHash = $previousHash
+    $json = $entry | ConvertTo-Json -Compress
+    $entry.hash = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($json))) -Algorithm SHA256).Hash
+    $entry | ConvertTo-Json -Compress | Out-File $logPath -Append
+    $global:previousHash = $entry.hash
 }
 
-function New-RandomMac {
-    # Get-Random -Maximum is exclusive, so use 256 to allow 0-255
-    $bytes = 1..6 | ForEach-Object { Get-Random -Minimum 0 -Maximum 256 }
-    # Set locally administered bit, ensure unicast
-    $bytes[0] = ($bytes[0] -bor 0x02) -band 0xFE
-    return ($bytes | ForEach-Object { $_.ToString("X2") }) -join ""
-}
+# ┌────────────────────────────────────────────────────────────┐
+# │ MACcloak: Adapter Scanner & Compatibility Check            │
+# │ Part 2: Detection & Filtering                              │
+# └────────────────────────────────────────────────────────────┘
 
-function Get-EffectiveMac {
-    param($Adapter)
-    return ($Adapter.MacAddress -replace "[:\-]", "").ToUpper()
-}
+function Get-CompatibleAdapters {
+    $results = @()
 
-function Bounce-Adapter {
-    param(
-        $Adapter,
-        [int]$MaxDisableSeconds = 45,
-        [int]$HealthWaitSeconds = 20
-    )
-    $adapterName = $Adapter.Name
-    Disable-NetAdapter -Name $adapterName -Confirm:$false
-    Start-Sleep -Seconds 5
-    Enable-NetAdapter -Name $adapterName -Confirm:$false
+    $adapters = Get-NetAdapter | Where-Object {
+        $_.Status -eq "Up" -and $_.HardwareInterface -eq $true -and $_.Name -notmatch $exclusionRegex
+    }
 
-    $deadline = (Get-Date).AddSeconds($HealthWaitSeconds)
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 1
-        $currentAdapter = Get-NetAdapter -Name $adapterName -ErrorAction SilentlyContinue
-        if ($null -ne $currentAdapter -and $currentAdapter.Status -eq 'Up') {
-            return $true
+    foreach ($adapter in $adapters) {
+        $name = $adapter.Name
+        $desc = $adapter.InterfaceDescription
+        $guid = $adapter.InterfaceGuid
+        $supportsCIM = $false
+        $supportsRegistry = $false
+
+        # Check CIM support
+        try {
+            $props = Get-NetAdapterAdvancedProperty -Name $name -ErrorAction Stop
+            if ($props.RegistryKeyword -contains "NetworkAddress") {
+                $supportsCIM = $true
+            }
+        } catch {}
+
+        # Check registry fallback
+        try {
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+            $subKey = Get-ChildItem $regPath | Where-Object {
+                (Get-ItemProperty "$regPath\$_").NetCfgInstanceId -eq $guid
+            }
+            if ($subKey) {
+                $supportsRegistry = $true
+            }
+        } catch {}
+
+        $status = if ($supportsCIM) {
+            "✅ CIM spoofing supported"
+        } elseif ($supportsRegistry) {
+            "⚠️ Registry spoofing fallback available"
+        } else {
+            "❌ Spoofing not supported"
+        }
+
+        $results += [PSCustomObject]@{
+            Name        = $name
+            Description = $desc
+            CIMSupport  = $supportsCIM
+            RegistryFallback = $supportsRegistry
+            Status      = $status
         }
     }
-    return $false
+
+    return $results
 }
 
+# If user runs -ScanAdapters, show compatibility and exit
+if ($ScanAdapters) {
+    $scanResults = Get-CompatibleAdapters
+    Write-Host "`n🔍 Adapter Compatibility Scan:`n"
+    $scanResults | Format-Table -AutoSize
+    exit 0
+}
 
-function Invoke-MACSpoof {
+# ┌────────────────────────────────────────────────────────────┐
+# │ MACcloak: MAC Generator & Spoofing Engine                  │
+# │ Part 3: Randomization & Application                        │
+# └────────────────────────────────────────────────────────────┘
+
+function Generate-RandomMAC {
+    # Locally administered MAC starts with 02
+    $macBytes = @("02")
+    for ($i = 1; $i -lt 6; $i++) {
+        $macBytes += "{0:X2}" -f (Get-Random -Minimum 0 -Maximum 256)
+    }
+    return ($macBytes -join "")
+}
+
+function Set-RandomMAC {
     param (
         [string]$AdapterName,
-        [string]$NewMAC,
-        [string]$PreviousHash = ""
+        [string]$NewMAC
     )
 
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $success = $false
     $errorMessage = $null
     $methodUsed = "None"
 
     try {
-        # Primary method: CIM-based spoofing
+        # Attempt CIM-based spoofing
         Set-NetAdapterAdvancedProperty -Name $AdapterName -RegistryKeyword "NetworkAddress" -RegistryValue $NewMAC -NoRestart -ErrorAction Stop
         $methodUsed = "CIM"
         $success = $true
@@ -168,142 +188,138 @@ function Invoke-MACSpoof {
     }
 
     # Bounce adapter if spoofing succeeded
-    if ($success) {
+    if ($success -and -not $AuditMode) {
         Disable-NetAdapter -Name $AdapterName -Confirm:$false
         Start-Sleep -Seconds 2
         Enable-NetAdapter -Name $AdapterName
     }
 
-    # Build log entry
-    $logEntry = @{
-        timestamp = $timestamp
+    return @{
         adapter = $AdapterName
         newMac = $NewMAC
         method = $methodUsed
         success = $success
         error = $errorMessage
-        previousHash = $PreviousHash
+    }
+}
+
+# ┌────────────────────────────────────────────────────────────┐
+# │ MACcloak: Execution Loop & Health Check                    │
+# │ Part 4: Adapter Spoofing & Logging                         │
+# └────────────────────────────────────────────────────────────┘
+
+$compatibleAdapters = Get-CompatibleAdapters | Where-Object {
+    $_.CIMSupport -or $_.RegistryFallback
+}
+
+foreach ($adapter in $compatibleAdapters) {
+    $name = $adapter.Name
+    $newMac = Generate-RandomMAC
+
+    if ($VerboseLogs) {
+        Write-Host "`n🎲 Spoofing $name with MAC: $newMac"
     }
 
-    # Chain hash
-    $json = $logEntry | ConvertTo-Json -Compress
-    $logEntry.hash = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([System.Text.Encoding]::UTF8.GetBytes($json))) -Algorithm SHA256).Hash
+    $result = Set-RandomMAC -AdapterName $name -NewMAC $newMac
 
-    return $logEntry
+    # Health check: wait for IPv4
+    $ipv4Healthy = $false
+    if (-not $AuditMode -and $result.success) {
+        $waitTime = $config.healthWaitSeconds
+        for ($i = 0; $i -lt $waitTime; $i++) {
+            Start-Sleep -Seconds 1
+            $ip = (Get-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+            if ($ip) {
+                $ipv4Healthy = $true
+                break
+            }
+        }
+
+        # Rollback if no IPv4
+        if (-not $ipv4Healthy) {
+            if ($VerboseLogs) {
+                Write-Warning "⚠️ No IPv4 after spoofing. Rolling back $name."
+            }
+
+            # Clear spoofed MAC
+            try {
+                Set-NetAdapterAdvancedProperty -Name $name -RegistryKeyword "NetworkAddress" -RegistryValue "" -NoRestart -ErrorAction SilentlyContinue
+            } catch {
+                # Fallback clear
+                try {
+                    $adapterObj = Get-NetAdapter -Name $name
+                    $guid = $adapterObj.InterfaceGuid
+                    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+                    $subKey = Get-ChildItem $regPath | Where-Object {
+                        (Get-ItemProperty "$regPath\$_").NetCfgInstanceId -eq $guid
+                    }
+                    if ($subKey) {
+                        Remove-ItemProperty "$regPath\$subKey" "NetworkAddress" -ErrorAction SilentlyContinue
+                    }
+                } catch {}
+            }
+
+            # Bounce adapter again
+            Disable-NetAdapter -Name $name -Confirm:$false
+            Start-Sleep -Seconds 2
+            Enable-NetAdapter -Name $name
+        }
+    }
+
+    # Log result
+    $entry = @{
+        timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        adapter   = $name
+        newMac    = $newMac
+        method    = $result.method
+        success   = $result.success
+        error     = $result.error
+        ipv4Healthy = $ipv4Healthy
+    }
+
+    Write-LogEntry -entry $entry
 }
 
+# ┌────────────────────────────────────────────────────────────┐
+# │ MACcloak: Scheduler Setup & Help Text                      │
+# │ Part 5: Finalization & User Guidance                       │
+# └────────────────────────────────────────────────────────────┘
 
-function Has-IPv4 {
-    param($Adapter)
-    $ipAddresses = Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-    return ($ipAddresses | Where-Object { $_.IPAddress }).Count -gt 0
-}
+function Setup-MACcloakSchedule {
+    $taskName = "MACcloak_DailySpoof"
+    $scriptPath = $MyInvocation.MyCommand.Path
 
-# =========================
-# MAIN RANDOMIZATION LOGIC
-# =========================
+    # Daily trigger
+    $triggerDaily = New-ScheduledTaskTrigger -Daily -At 7:00am
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -File `"$scriptPath`""
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 
-# Load config
-if (-not (Test-Path $ConfigPath)) {
-    Write-Host "❌ Config file not found: $ConfigPath" -ForegroundColor Red
-    exit 1
-}
-$cfg = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+    Register-ScheduledTask -TaskName $taskName -Trigger $triggerDaily -Action $action -Principal $principal -Force
 
-# Find a volume matching one of the configured labels. Prefer volumes with a DriveLetter.
-$volumes = Get-Volume | Where-Object { $_.FileSystemLabel -in $cfg.ExternalLog.VolumeLabels }
-$vol = $volumes | Where-Object { $_.DriveLetter } | Select-Object -First 1
-if (-not $vol) { $vol = $volumes | Select-Object -First 1 }
+    # Optional startup trigger
+    if ($config.scheduleAtStartup) {
+        $triggerBoot = New-ScheduledTaskTrigger -AtStartup
+        Register-ScheduledTask -TaskName "${taskName}_Startup" -Trigger $triggerBoot -Action $action -Principal $principal -Force
+    }
 
-$logRoot = if ($vol) {
-    if ($vol.DriveLetter) { $vol.DriveLetter + ":\randomMAC" }
-    else { Join-Path $vol.Path "randomMAC" }
-} elseif ($cfg.ExternalLog.FallbackLocal) { Join-Path $PSScriptRoot "logs" } else { throw "No log volume" }
-if (!(Test-Path $logRoot)) { New-Item -ItemType Directory -Path $logRoot | Out-Null }
-
-# Prepare log paths
-$day = (Get-Date -f yyyy-MM-dd)
-$paths = [pscustomobject]@{
-    Json = Join-Path $logRoot "randomMAC-$day.jsonl"
-    Text = Join-Path $logRoot "randomMAC-$day.log"
-    Hash = Join-Path $logRoot $cfg.Forensics.HashChainFile
-}
-$prevHash = Get-PrevHash $paths.Hash
-
-# Select adapters
-$adapters = Get-NetAdapter -Physical | Where-Object { $_.Status -ne "Disabled" } | Where-Object {
-    $name = $_.Name + " " + $_.InterfaceDescription
-    -not ($cfg.Adapters.ExcludePatterns | Where-Object { $name -match $_ })
-}
-
-if (-not $adapters) {
-    Write-Status "No target adapters found." "WARN"
+    Write-Host "`n🗓️ MACcloak schedule created successfully."
+    Write-Host "Daily spoofing will run at 7:00 AM as SYSTEM."
+    if ($config.scheduleAtStartup) {
+        Write-Host "Startup spoofing also enabled."
+    }
     exit 0
 }
 
-foreach ($a in $adapters) {
-    $old = Get-EffectiveMac $a
-    $entry = [ordered]@{
-        ts      = (Get-Date).ToString("o")
-        adapter = $a.Name
-        desc    = $a.InterfaceDescription
-        oldMac  = $old
-        newMac  = $null
-        success = $false
-        error   = $null
-    }
-
-    if ($AuditMode) {
-        $json = $entry | ConvertTo-Json -Compress
-        $currHash = Compute-Hash "$prevHash|$json"
-        $entry.hashPrev = $prevHash
-        $entry.hashCurr = $currHash
-        Add-Content $paths.Json ($entry | ConvertTo-Json -Compress)
-        Add-Content $paths.Text "$old AUDIT"
-        Set-PrevHash $paths.Hash $currHash
-        $prevHash = $currHash
-        continue
-    }
-
-    $new = New-RandomMac
-    $entry.newMac = $new
-
-    try {
-        Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword "NetworkAddress" -RegistryValue $new -NoRestart -ErrorAction Stop | Out-Null
-    } catch {
-        $entry.error = "Set failed"
-        Add-Content $paths.Text "$old FAIL"
-        continue
-    }
-
-    if (!(Bounce-Adapter $a -MaxDisableSeconds $cfg.Safety.MaxDisableSeconds -HealthWaitSeconds $cfg.Safety.HealthWaitSeconds)) {
-        $entry.error = "Bounce fail"
-        continue
-    }
-
-    $now = Get-EffectiveMac (Get-NetAdapter -Name $a.Name)
-    if ($cfg.Safety.RollbackOnNoIPv4 -and !(Has-IPv4 $a)) {
-        Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword "NetworkAddress" -RegistryValue "" -NoRestart
-        Bounce-Adapter $a
-        $entry.error = "No IPv4, rolled back"
-        continue
-    }
-
-    if ($now -ne $new) {
-        $entry.error = "Mismatch"
-        continue
-    }
-
-    $entry.success = $true
-    $json = $entry | ConvertTo-Json -Compress
-    $currHash = Compute-Hash "$prevHash|$json"
-    $entry.hashPrev = $prevHash
-    $entry.hashCurr = $currHash
-    Add-Content $paths.Json ($entry | ConvertTo-Json -Compress)
-    Add-Content $paths.Text "$old -> $new OK"
-    Set-PrevHash $paths.Hash $currHash
-    $prevHash = $currHash
+# Run scheduler setup if requested
+if ($SetupSchedule) {
+    Setup-MACcloakSchedule
 }
 
-Write-Status "Done"
-
+# Onboarding message for first-time users
+if (-not ($AuditMode -or $ScanAdapters -or $SetupSchedule)) {
+    Write-Host "`n🛡️ Welcome to MACcloak — forensic-grade MAC randomization."
+    Write-Host "Your config is loaded, logging is active, and spoofing is ready."
+    Write-Host "Use -AuditMode to simulate runs, or -VerboseLogs for debug output."
+    Write-Host "Run -SetupSchedule to automate daily spoofing."
+    Write-Host "Run -ScanAdapters to preview compatibility."
+}
